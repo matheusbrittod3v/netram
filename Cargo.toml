@@ -1,0 +1,7 @@
+[workspace]
+members = [
+    "netram-proto",
+    "netram-server",
+    "netram-client",
+]
+resolver = "2"

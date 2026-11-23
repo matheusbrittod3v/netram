@@ -1,0 +1,13 @@
+[package]
+name = "netram-server"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+netram-proto = { path = "../netram-proto" }
+tokio = { version = "1.38", features = ["full"] }
+socket2 = "0.5"
+rayon = "1.10"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

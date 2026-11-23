@@ -1,0 +1,11 @@
+[package]
+name = "netram-client"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+netram-proto = { path = "../netram-proto" }
+tokio = { version = "1.38", features = ["full"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
