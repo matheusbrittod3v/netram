@@ -79,11 +79,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let rtt = client.ping().await?;
     println!("⚡ Latência de ping inicial com Windows: {:.2} µs ({:.3} ms)", rtt, rtt / 1000.0);
 
-    let prompt = "Implementação distribuída de alta velocidade entre Mac M-series e notebook Windows:";
+    let args: Vec<String> = std::env::args().collect();
+    let prompt = if args.len() > 1 {
+        args[1..].join(" ")
+    } else {
+        "Implementação distribuída de alta velocidade entre Mac M-series e notebook Windows:".to_string()
+    };
     println!("\n📝 Prompt de Entrada: \"{}\"", prompt);
     println!("🚀 Iniciando Pipeline Parallelism distribuído...\n");
 
-    let mut current_token: u32 = 12; // Start token seed
+    // Inicializa a seed baseada no hash do prompt fornecido
+    let mut current_token: u32 = prompt.bytes().fold(42u32, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u32)) % 1000;
     let mut current_state: Vec<f32> = Vec::new();
     let num_tokens_to_generate = 60;
 
