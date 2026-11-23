@@ -1,0 +1,11 @@
+[package]
+name = "netram-chat"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+netram-client = { path = "../../netram-client" }
+netram-proto = { path = "../../netram-proto" }
+tokio = { version = "1.38", features = ["full", "process"] }
+colored = "2.1"
+rustyline = "14.0"
