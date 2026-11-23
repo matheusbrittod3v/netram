@@ -3,5 +3,6 @@ members = [
     "netram-proto",
     "netram-server",
     "netram-client",
+    "projects/hybrid-memory-demo",
 ]
 resolver = "2"
