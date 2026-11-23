@@ -277,6 +277,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "netram-pipeline-ai"
+version = "0.1.0"
+dependencies = [
+ "netram-client",
+ "netram-proto",
+ "rayon",
+ "tokio",
+]
+
+[[package]]
 name = "netram-proto"
 version = "0.1.0"
 dependencies = [

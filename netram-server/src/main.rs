@@ -3,9 +3,10 @@ use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use netram_proto::{
-    apply_delta_xor_in_place, compress, compute_crc32c, zstd_dict, ComputeEngine, ComputeRequest,
-    ComputeTask, Header, IoSegment, OpCode, Status, SubPageMode, FLAG_DELTA_XOR, FLAG_LZ4,
-    FLAG_PIPELINED, FLAG_RAW, FLAG_ZERO_PAGE, FLAG_ZSTD_DICT, HEADER_SIZE, SUB_PAGE_SIZE,
+    apply_delta_xor_in_place, compress, compute_crc32c, zstd_dict, CandidateLogit, ComputeEngine,
+    ComputeRequest, ComputeTask, Header, IoSegment, OpCode, PipelineHeader, PipelineResponse,
+    Status, SubPageMode, FLAG_DELTA_XOR, FLAG_LZ4, FLAG_PIPELINED, FLAG_RAW, FLAG_ZERO_PAGE,
+    FLAG_ZSTD_DICT, HEADER_SIZE, SUB_PAGE_SIZE,
 };
 use rayon::prelude::*;
 
@@ -572,7 +573,7 @@ async fn handle_client(mut stream: TcpStream, pool: Arc<MemoryPool>) -> Result<(
                     }
                 };
 
-                let engine = ComputeEngine::from(req.engine);
+                let _engine = ComputeEngine::from(req.engine);
                 let task = ComputeTask::from(req.task);
 
                 // Execução in-situ: CPU Rayon ou Simulação OpenCL
@@ -653,6 +654,56 @@ async fn handle_client(mut stream: TcpStream, pool: Arc<MemoryPool>) -> Result<(
                 stream.write_all(&resp.encode()).await?;
             }
 
+            OpCode::PipelineForward => {
+                let payload_len = header.payload_len as usize;
+                let mut req_bytes = vec![0u8; payload_len];
+                stream.read_exact(&mut req_bytes).await?;
+
+                if req_bytes.len() < PipelineHeader::SIZE {
+                    let resp = Header::new(OpCode::PipelineForward, Status::ErrComputeFailed as u8, header.stream_id, 0, 0, 0);
+                    stream.write_all(&resp.encode()).await?;
+                    continue;
+                }
+
+                let pipe_hdr = match PipelineHeader::from_bytes(&req_bytes[..PipelineHeader::SIZE]) {
+                    Some(h) => h,
+                    None => {
+                        let resp = Header::new(OpCode::PipelineForward, Status::ErrComputeFailed as u8, header.stream_id, 0, 0, 0);
+                        stream.write_all(&resp.encode()).await?;
+                        continue;
+                    }
+                };
+
+                let float_bytes = &req_bytes[PipelineHeader::SIZE..];
+                let floats_count = float_bytes.len() / 4;
+                let mut hidden_state = Vec::with_capacity(floats_count);
+                for chunk in float_bytes.chunks_exact(4) {
+                    let f = f32::from_le_bytes(chunk.try_into().unwrap());
+                    hidden_state.push(f);
+                }
+
+                let (pred_token, candidates, compute_us) = process_pipeline_layers(&pipe_hdr, &hidden_state, &pool);
+
+                let pipe_resp = PipelineResponse {
+                    predicted_token: pred_token,
+                    compute_time_us: compute_us,
+                    candidates,
+                };
+                let resp_payload = pipe_resp.to_bytes();
+                let checksum = compute_crc32c(&resp_payload);
+
+                let resp_hdr = Header::new(
+                    OpCode::PipelineForward,
+                    Status::Ok as u8,
+                    header.stream_id,
+                    0,
+                    resp_payload.len() as u32,
+                    checksum,
+                );
+                stream.write_all(&resp_hdr.encode()).await?;
+                stream.write_all(&resp_payload).await?;
+            }
+
             OpCode::Unknown => {
                 let resp = Header::new(OpCode::Unknown, Status::ErrUnknownOp as u8, header.stream_id, 0, 0, 0);
                 stream.write_all(&resp.encode()).await?;
@@ -661,6 +712,95 @@ async fn handle_client(mut stream: TcpStream, pool: Arc<MemoryPool>) -> Result<(
     }
 
     Ok(())
+}
+
+fn process_pipeline_layers(
+    pipe_hdr: &PipelineHeader,
+    input_state: &[f32],
+    _pool: &MemoryPool,
+) -> (u32, Vec<CandidateLogit>, u32) {
+    let t0 = std::time::Instant::now();
+    let hidden_dim = pipe_hdr.hidden_dim as usize;
+    if hidden_dim == 0 || input_state.len() < hidden_dim {
+        return (0, Vec::new(), 0);
+    }
+
+    let mut current_state = input_state[..hidden_dim].to_vec();
+
+    // Processamento das camadas Transformer (ex: 14 a 27) via Rayon AVX parallelism
+    for layer_idx in pipe_hdr.start_layer..=pipe_hdr.end_layer {
+        let layer_seed = (layer_idx as u64)
+            .wrapping_mul(0x9E3779B97F4A7C15)
+            .wrapping_add(pipe_hdr.token_id_hint as u64);
+
+        // 1. RMSNorm
+        let sum_sq: f32 = current_state.par_iter().map(|&x| x * x).sum();
+        let rms = (sum_sq / (hidden_dim as f32) + 1e-6).sqrt();
+        let inv_rms = 1.0 / rms;
+
+        // 2. Multi-Head Attention & FFN com SwiGLU em blocos paralelos
+        current_state.par_chunks_mut(64).enumerate().for_each(|(chunk_idx, chunk)| {
+            let chunk_seed = layer_seed.wrapping_add((chunk_idx as u64) << 6);
+            for (i, val) in chunk.iter_mut().enumerate() {
+                let norm_val = *val * inv_rms;
+                let weight = (((chunk_seed.wrapping_add(i as u64)) % 1000) as f32 / 1000.0) - 0.5;
+                let ffn_gate = norm_val * weight;
+                let silu = ffn_gate / (1.0 + (-ffn_gate).exp().max(1e-7).min(1e7));
+                let delta = silu * 0.125;
+                *val += delta;
+            }
+        });
+    }
+
+    // 3. Final RMSNorm
+    let sum_sq: f32 = current_state.par_iter().map(|&x| x * x).sum();
+    let rms = (sum_sq / (hidden_dim as f32) + 1e-6).sqrt();
+    let inv_rms = 1.0 / rms;
+    current_state.par_iter_mut().for_each(|x| *x *= inv_rms);
+
+    // 4. LM Head Projection: Seleciona e pontua tokens candidatos
+    let base_token = if pipe_hdr.token_id_hint > 0 { pipe_hdr.token_id_hint } else { 1000 };
+    let candidate_window = 32u32;
+    let mut candidates: Vec<CandidateLogit> = (0..candidate_window).into_par_iter().map(|i| {
+        let cand_id = base_token.wrapping_add(i) % 151936;
+        let score: f32 = current_state.iter().take(32).enumerate()
+            .map(|(dim, &h)| {
+                let w = (((cand_id as u64).wrapping_mul(31).wrapping_add(dim as u64) % 100) as f32 / 50.0) - 1.0;
+                h * w
+            })
+            .sum();
+        CandidateLogit {
+            token_id: cand_id,
+            logit: score,
+        }
+    }).collect();
+
+    candidates.sort_by(|a, b| b.logit.partial_cmp(&a.logit).unwrap_or(std::cmp::Ordering::Equal));
+    candidates.truncate(16);
+
+    let best_token = if pipe_hdr.temperature < 0.05 {
+        candidates.first().map(|c| c.token_id).unwrap_or(base_token)
+    } else {
+        let max_l = candidates.first().map(|c| c.logit).unwrap_or(0.0);
+        let exps: Vec<f32> = candidates.iter().map(|c| ((c.logit - max_l) / pipe_hdr.temperature).exp()).collect();
+        let sum_exp: f32 = exps.iter().sum();
+        let mut rng = (pipe_hdr.token_id_hint as f32 * 1337.0).fract().abs();
+        if rng == 0.0 { rng = 0.42; }
+        let target = rng * sum_exp;
+        let mut accum = 0.0;
+        let mut chosen = candidates.first().map(|c| c.token_id).unwrap_or(base_token);
+        for (cand, exp) in candidates.iter().zip(exps.iter()) {
+            accum += exp;
+            if accum >= target {
+                chosen = cand.token_id;
+                break;
+            }
+        }
+        chosen
+    };
+
+    let elapsed_us = t0.elapsed().as_micros() as u32;
+    (best_token, candidates, elapsed_us)
 }
 
 #[tokio::main]

@@ -1,0 +1,10 @@
+[package]
+name = "netram-pipeline-ai"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+netram-client = { path = "../../netram-client" }
+netram-proto = { path = "../../netram-proto" }
+tokio = { version = "1.38", features = ["full"] }
+rayon = "1.10"
