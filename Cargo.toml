@@ -6,6 +6,6 @@ members = [
     "projects/hybrid-memory-demo",
     "projects/netram-kv-cache",
     "projects/netram-chat",
-    "projects/netram-pipeline-ai",
+    "projects/distributed-layer-split",
 ]
 resolver = "2"

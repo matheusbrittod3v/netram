@@ -47,7 +47,6 @@ pub enum OpCode {
     AtomicAdd = 0x0A,     // Remote Hardware Fetch-And-Add (lock xadd)
     WriteHybrid = 0x0B,   // Hybrid Sub-Page Chunking (64 KB heterogeneous tiles)
     RemoteCompute = 0x0C, // In-Situ CPU (Rayon/AVX) & GPU (OpenCL 1.2) Execution
-    PipelineForward = 0x0D, // Pipeline Parallelism: Forward Hidden State (Layers 14-27 on Windows)
     Unknown = 0xFF,
 }
 
@@ -67,7 +66,6 @@ impl From<u8> for OpCode {
             0x0A => OpCode::AtomicAdd,
             0x0B => OpCode::WriteHybrid,
             0x0C => OpCode::RemoteCompute,
-            0x0D => OpCode::PipelineForward,
             _ => OpCode::Unknown,
         }
     }
@@ -487,127 +485,6 @@ impl ComputeRequest {
             param_a,
             param_b,
             extra,
-        })
-    }
-}
-
-// ============================================================================
-// PIPELINE PARALLELISM: FORWARDING DE HIDDEN STATES (QWEN 2.5 CODER)
-// ============================================================================
-
-/// Cabeçalho de Forwarding de Pipeline: Camadas 14 a 27 no Windows
-#[repr(C, packed)]
-#[derive(Debug, Clone, Copy)]
-pub struct PipelineHeader {
-    pub start_layer: u8,   // Ex: 14
-    pub end_layer: u8,     // Ex: 27
-    pub hidden_dim: u16,   // Ex: 1536 floats para Qwen 1.5B (6.144 bytes)
-    pub seq_len: u32,      // Número de tokens no batch
-    pub temperature: f32,  // Temperatura de amostragem
-    pub top_p: f32,        // Top-p sampling
-    pub token_id_hint: u32,// ID estimado
-    pub flags: u32,
-}
-
-impl PipelineHeader {
-    pub const SIZE: usize = 24;
-
-    pub fn to_bytes(&self) -> [u8; Self::SIZE] {
-        let mut buf = [0u8; Self::SIZE];
-        buf[0] = self.start_layer;
-        buf[1] = self.end_layer;
-        buf[2..4].copy_from_slice(&self.hidden_dim.to_le_bytes());
-        buf[4..8].copy_from_slice(&self.seq_len.to_le_bytes());
-        buf[8..12].copy_from_slice(&self.temperature.to_le_bytes());
-        buf[12..16].copy_from_slice(&self.top_p.to_le_bytes());
-        buf[16..20].copy_from_slice(&self.token_id_hint.to_le_bytes());
-        buf[20..24].copy_from_slice(&self.flags.to_le_bytes());
-        buf
-    }
-
-    pub fn from_bytes(slice: &[u8]) -> Option<Self> {
-        if slice.len() < Self::SIZE {
-            return None;
-        }
-        let start_layer = slice[0];
-        let end_layer = slice[1];
-        let hidden_dim = u16::from_le_bytes(slice[2..4].try_into().ok()?);
-        let seq_len = u32::from_le_bytes(slice[4..8].try_into().ok()?);
-        let temperature = f32::from_le_bytes(slice[8..12].try_into().ok()?);
-        let top_p = f32::from_le_bytes(slice[12..16].try_into().ok()?);
-        let token_id_hint = u32::from_le_bytes(slice[16..20].try_into().ok()?);
-        let flags = u32::from_le_bytes(slice[20..24].try_into().ok()?);
-
-        Some(Self {
-            start_layer,
-            end_layer,
-            hidden_dim,
-            seq_len,
-            temperature,
-            top_p,
-            token_id_hint,
-            flags,
-        })
-    }
-}
-
-/// Logit de um candidato com probabilidade
-#[repr(C)]
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct CandidateLogit {
-    pub token_id: u32,
-    pub logit: f32,
-}
-
-/// Resposta do Pipeline retornada pelo Windows para o Mac
-#[derive(Debug, Clone)]
-pub struct PipelineResponse {
-    pub predicted_token: u32,
-    pub compute_time_us: u32,
-    pub candidates: Vec<CandidateLogit>,
-}
-
-impl PipelineResponse {
-    pub fn to_bytes(&self) -> Vec<u8> {
-        let count = self.candidates.len().min(64) as u16;
-        let mut buf = Vec::with_capacity(12 + (count as usize * 8));
-        buf.extend_from_slice(&self.predicted_token.to_le_bytes());
-        buf.extend_from_slice(&self.compute_time_us.to_le_bytes());
-        buf.extend_from_slice(&count.to_le_bytes());
-        buf.extend_from_slice(&[0u8; 2]); // reserved
-
-        for cand in &self.candidates[..count as usize] {
-            buf.extend_from_slice(&cand.token_id.to_le_bytes());
-            buf.extend_from_slice(&cand.logit.to_le_bytes());
-        }
-        buf
-    }
-
-    pub fn from_bytes(slice: &[u8]) -> Option<Self> {
-        if slice.len() < 12 {
-            return None;
-        }
-        let predicted_token = u32::from_le_bytes(slice[0..4].try_into().ok()?);
-        let compute_time_us = u32::from_le_bytes(slice[4..8].try_into().ok()?);
-        let count = u16::from_le_bytes(slice[8..10].try_into().ok()?) as usize;
-
-        let expected_len = 12 + count * 8;
-        if slice.len() < expected_len {
-            return None;
-        }
-
-        let mut candidates = Vec::with_capacity(count);
-        for i in 0..count {
-            let offset = 12 + i * 8;
-            let token_id = u32::from_le_bytes(slice[offset..offset + 4].try_into().ok()?);
-            let logit = f32::from_le_bytes(slice[offset + 4..offset + 8].try_into().ok()?);
-            candidates.push(CandidateLogit { token_id, logit });
-        }
-
-        Some(Self {
-            predicted_token,
-            compute_time_us,
-            candidates,
         })
     }
 }

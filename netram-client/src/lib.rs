@@ -7,8 +7,8 @@ pub use resilient::{QueuedWrite, ResilientNetRamClient};
 use netram_proto::{
     compute_crc32c, compute_delta_xor, is_all_zeros, select_best_strategy, zstd_dict,
     AdaptiveStrategy, ComputeEngine, ComputeRequest, ComputeTask, Header, OpCode,
-    PipelineHeader, PipelineResponse, Status, SubPageMode, FLAG_DELTA_XOR,
-    FLAG_LZ4, FLAG_PIPELINED, FLAG_RAW, FLAG_ZERO_PAGE, FLAG_ZSTD_DICT, HEADER_SIZE, SUB_PAGE_SIZE,
+    Status, SubPageMode, FLAG_DELTA_XOR, FLAG_LZ4, FLAG_PIPELINED, FLAG_RAW, FLAG_ZERO_PAGE,
+    FLAG_ZSTD_DICT, HEADER_SIZE, SUB_PAGE_SIZE,
 };
 use std::time::Instant;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -360,6 +360,16 @@ impl NetRamClient {
         self.read_adaptive(offset, dest_len).await
     }
 
+    /// Gravação transparente de memória remota via estratégia adaptativa (ZeroCopy / LZ4 / ZSTD)
+    pub async fn write(&mut self, offset: u64, data: &[u8]) -> Result<usize, Box<dyn std::error::Error + Send + Sync>> {
+        self.write_adaptive(offset, data).await.map(|(len, _)| len)
+    }
+
+    /// Leitura transparente de memória remota com descompressão adaptativa automática
+    pub async fn read(&mut self, offset: u64, dest_len: usize) -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>> {
+        self.read_adaptive(offset, dest_len).await
+    }
+
     /// Executa computação in-situ nos dados que já moram na RAM física do notebook Windows
     pub async fn remote_compute(
         &mut self,
@@ -411,50 +421,5 @@ impl NetRamClient {
         }
 
         Ok(result)
-    }
-
-    /// Pipeline Parallelism: Envia o vetor Hidden State das camadas 0-13 processadas no Mac
-    /// para o Windows processar as camadas 14-27 e calcular os logits/probabilidades.
-    pub async fn pipeline_forward(
-        &mut self,
-        pipe_header: PipelineHeader,
-        hidden_state: &[f32],
-    ) -> Result<PipelineResponse, Box<dyn std::error::Error + Send + Sync>> {
-        let mut payload = Vec::with_capacity(PipelineHeader::SIZE + hidden_state.len() * 4);
-        payload.extend_from_slice(&pipe_header.to_bytes());
-        for &val in hidden_state {
-            payload.extend_from_slice(&val.to_le_bytes());
-        }
-
-        let checksum = compute_crc32c(&payload);
-        let header = Header::new(
-            OpCode::PipelineForward,
-            0,
-            0,
-            0,
-            payload.len() as u32,
-            checksum,
-        );
-
-        self.stream.write_all(&header.encode()).await?;
-        self.stream.write_all(&payload).await?;
-
-        let mut resp_buf = [0u8; HEADER_SIZE];
-        self.stream.read_exact(&mut resp_buf).await?;
-        let resp = Header::decode(&resp_buf)?;
-
-        if resp.status_or_flags != Status::Ok as u8 {
-            return Err(format!("Falha no PipelineForward: status {:?}", resp.status_or_flags).into());
-        }
-
-        let mut resp_payload = vec![0u8; resp.payload_len as usize];
-        self.stream.read_exact(&mut resp_payload).await?;
-
-        if resp.checksum != 0 && compute_crc32c(&resp_payload) != resp.checksum {
-            return Err("Corrupção de integridade nos logits do Pipeline!".into());
-        }
-
-        PipelineResponse::from_bytes(&resp_payload)
-            .ok_or_else(|| "Erro ao decodificar PipelineResponse".into())
     }
 }

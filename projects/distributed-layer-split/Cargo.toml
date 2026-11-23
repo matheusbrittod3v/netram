@@ -1,5 +1,5 @@
 [package]
-name = "netram-pipeline-ai"
+name = "distributed-layer-split"
 version = "0.1.0"
 edition = "2021"
 
