@@ -1,0 +1,10 @@
+[package]
+name = "netram-kv-cache"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+netram-client = { path = "../../netram-client" }
+netram-proto = { path = "../../netram-proto" }
+tokio = { version = "1.38", features = ["full"] }
+rand = "0.8"

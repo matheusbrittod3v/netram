@@ -175,6 +175,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "netram-kv-cache"
+version = "0.1.0"
+dependencies = [
+ "netram-client",
+ "netram-proto",
+ "rand",
+ "tokio",
+]
+
+[[package]]
 name = "netram-proto"
 version = "0.1.0"
 dependencies = [

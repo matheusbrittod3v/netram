@@ -4,5 +4,6 @@ members = [
     "netram-server",
     "netram-client",
     "projects/hybrid-memory-demo",
+    "projects/netram-kv-cache",
 ]
 resolver = "2"
