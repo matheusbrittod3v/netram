@@ -82,13 +82,8 @@ impl TieredMemory {
             let offset = lru_page_id * self.page_size as u64;
             let mut client = self.client.lock().await;
 
-            if let Some(ref baseline) = page.clean_baseline {
-                let (bytes_sent, _) = client.write_delta_xor(offset, baseline, &page.data).await?;
-                self.stats.delta_evictions += 1;
-                let _ = bytes_sent;
-            } else {
-                client.write_adaptive(offset, &page.data).await?;
-            }
+            // Usa Pipelined Streaming para máxima velocidade no Wi-Fi
+            client.write_pipelined_stream(offset, &page.data).await?;
         }
 
         self.stats.evictions += 1;
@@ -254,11 +249,7 @@ impl TieredMemory {
         for (page_id, page) in self.pages.iter_mut() {
             if page.is_dirty {
                 let offset = *page_id * self.page_size as u64;
-                if let Some(ref baseline) = page.clean_baseline {
-                    client.write_delta_xor(offset, baseline, &page.data).await?;
-                } else {
-                    client.write_adaptive(offset, &page.data).await?;
-                }
+                client.write_pipelined_stream(offset, &page.data).await?;
                 page.clean_baseline = Some(page.data.clone());
                 page.is_dirty = false;
             }

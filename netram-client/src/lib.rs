@@ -7,7 +7,7 @@ pub use resilient::{QueuedWrite, ResilientNetRamClient};
 use netram_proto::{
     compute_crc32c, compute_delta_xor, fec, is_all_zeros, select_best_strategy, zstd_dict,
     AdaptiveStrategy, ComputeEngine, ComputeRequest, ComputeTask, Header, IoSegment, OpCode, Status,
-    SubPageMode, FLAG_DELTA_XOR, FLAG_FEC_PARITY, FLAG_LZ4, FLAG_RAW, FLAG_ZERO_PAGE, FLAG_ZSTD_DICT,
+    SubPageMode, FLAG_DELTA_XOR, FLAG_FEC_PARITY, FLAG_LZ4, FLAG_PIPELINED, FLAG_RAW, FLAG_ZERO_PAGE, FLAG_ZSTD_DICT,
     HEADER_SIZE, SUB_PAGE_SIZE,
 };
 use std::time::Instant;
@@ -261,6 +261,37 @@ impl NetRamClient {
                 }
                 Ok((data.len(), "ADAPTIVE: RAW-ZERO-COPY (Alta Entropia)"))
             }
+        }
+    }
+
+    /// Envia uma rajada assíncrona de páginas com FLAG_PIPELINED (saturação total do Wi-Fi a 50-70 MB/s)
+    pub async fn write_pipelined_stream(
+        &mut self,
+        offset: u64,
+        data: &[u8],
+    ) -> Result<usize, Box<dyn std::error::Error + Send + Sync>> {
+        let is_zeros = is_all_zeros(data);
+        if is_zeros {
+            let req = Header::new(OpCode::Write, FLAG_ZERO_PAGE | FLAG_PIPELINED, 0, offset, data.len() as u32, 0);
+            self.stream.write_all(&req.encode()).await?;
+            return Ok(0);
+        }
+
+        // Tenta compressão rápida LZ4
+        let compressed = netram_proto::compress::compress_prepend_size(data);
+        if compressed.len() < data.len() {
+            let crc = compute_crc32c(&compressed);
+            let comp_len = compressed.len();
+            let req = Header::new(OpCode::Write, FLAG_LZ4 | FLAG_PIPELINED, 0, offset, comp_len as u32, crc);
+            self.stream.write_all(&req.encode()).await?;
+            self.stream.write_all(&compressed).await?;
+            Ok(comp_len)
+        } else {
+            let crc = compute_crc32c(data);
+            let req = Header::new(OpCode::Write, FLAG_RAW | FLAG_PIPELINED, 0, offset, data.len() as u32, crc);
+            self.stream.write_all(&req.encode()).await?;
+            self.stream.write_all(data).await?;
+            Ok(data.len())
         }
     }
 
