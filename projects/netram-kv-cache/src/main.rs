@@ -22,7 +22,7 @@ use std::time::Instant;
 
 const BYTES_PER_TOKEN_KV: usize = 28_672; // ~28 KB por token no Qwen 2.5 1.5B
 const HOT_CACHE_TOKENS: usize = 500;       // Janela quente mantida no Mac (~14 MB)
-const TOTAL_CONTEXT_TOKENS: usize = 3_000; // Simulação de contexto longo (~86 MB de tensores)
+const TOTAL_CONTEXT_TOKENS: usize = 10_000; // Carga massiva: 10.000 tokens (~273 MB de tensores K/V)
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
